@@ -1,50 +1,65 @@
-import json
-import os
+# planner/planner.py
+from __future__ import annotations
 import re
+import json
+from pathlib import Path
+from typing import Dict, Any, Optional
 
-class TaskPlanner:
-    def __init__(self, file_path="tasks.json"):
-        self.tasks = []
-        self.file_path = file_path
-        self.load()
-        self.save()  # Fuerza creación del archivo al iniciar
+RULES_PATH = Path(__file__).resolve().parent / "rules.json"
 
-    def detect_task(self, user_input):
-        if re.search(r"\b(crea|haz|programa|construye)\b", user_input, re.IGNORECASE):
-            return f"Tarea de creación detectada: '{user_input}'"
-        if re.search(r"\b(busca|investiga|encuentra)\b", user_input, re.IGNORECASE):
-            return f"Tarea de búsqueda detectada: '{user_input}'"
-        if re.search(r"\b(explica|define|cuenta|describe)\b", user_input, re.IGNORECASE):
-            return f"Tarea de explicación detectada: '{user_input}'"
-        return None
+_INTENT_PATTERNS = [
+    ("remember", r"\b(recuerda que|anota que|guarda que|me llamo|estoy en|vivo en|me gusta)\b"),
+    ("recall",   r"\b(qué me anotaste|qué recuerdas|qué sabes de mí|cómo me llamo|dónde estoy|mis preferencias)\b"),
+    ("math",     r"\b(calcula|cuánto es|resuelve|^[-+*/()\d\.\s^]+$)"),
+    ("datetime", r"\b(qué hora es|fecha de hoy|hoy es|mañana es|ayer fue)\b"),
+    ("tasklist", r"\b(lista de tareas|to-?do|pendientes)\b"),
+    ("smalltalk",r".*"),  # fallback
+]
 
-    def register_task(self, task):
-        self.tasks.append(task)
-        self.save()
-
-    def get_tasks(self):
-        return self.tasks
-
-    def clear(self):
-        self.tasks = []
-        self.save()
-        print(f"[✓] Tareas limpiadas y archivo {self.file_path} actualizado.")
-
-    def save(self):
+def _load_rules() -> Dict[str, Any]:
+    if RULES_PATH.exists():
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self.tasks, f, indent=2, ensure_ascii=False)
-            print(f"[✓] Tareas guardadas en {self.file_path}")
-        except Exception as e:
-            print(f"[!] Error al guardar tareas: {e}")
+            return json.loads(RULES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    # fallback mínimo si el rules.json no está disponible
+    return {
+        "remember": {"next": "memory.update"},
+        "recall": {"next": "memory.report"},
+        "math": {"next": "tool.calculator"},
+        "datetime": {"next": "tool.datetime"},
+        "tasklist": {"next": "tool.tasklist_stub"},
+        "smalltalk": {"next": "llm.reply"}
+    }
 
-    def load(self):
-        if os.path.exists(self.file_path):
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    self.tasks = json.load(f)
-                print(f"[✓] Tareas cargadas desde {self.file_path}")
-            except Exception as e:
-                print(f"[!] Error al cargar tareas: {e}")
-        else:
-            print(f"[ℹ️] {self.file_path} no existe. Se creará al guardar.")
+class Planner:
+    def __init__(self):
+        self.rules = _load_rules()
+
+    def detect(self, text: str, memory=None) -> Dict[str, Any]:
+        t = (text or "").strip().lower()
+        intent = "smalltalk"
+        slots: Dict[str, Any] = {}
+
+        for name, pat in _INTENT_PATTERNS:
+            if re.search(pat, t):
+                intent = name
+                break
+
+        # extracción simple de slots
+        if intent == "remember":
+            # nombre
+            m = re.search(r"\bme llamo\s+([a-záéíóúñ]+)", t)
+            if m: slots["name"] = m.group(1).strip().title()
+            # ubicación
+            m = re.search(r"\b(estoy en|vivo en)\s+(.+)", t)
+            if m: slots["location"] = m.group(2).strip().rstrip(".")
+            # preferencias
+            m = re.search(r"\bme gusta[n]?\s+(.+)", t)
+            if m: slots.setdefault("preferences", []).append(m.group(1).strip().rstrip("."))
+
+        return {
+            "intent": intent,
+            "slots": slots,
+            "next": self.rules.get(intent, {}).get("next", "llm.reply")
+        }
